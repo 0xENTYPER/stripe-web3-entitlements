@@ -231,6 +231,12 @@ This avoids both false success and hostile failure. Billing latency is explained
 
 This is a reference implementation, not PCI guidance or a complete checkout service. It does not create Checkout sessions, verify wallet signatures, persist real customer data, or contain production pricing.
 
+## Related work
+
+- [telegram-miniapp-starter](https://github.com/0xENTYPER/telegram-miniapp-starter) demonstrates the authenticated Telegram surface that can consume entitlements.
+- [ElonTracker](https://github.com/0xENTYPER/elon-tracker) provides product context for Stripe-backed paid access and Telegram delivery.
+- [Baggy](https://github.com/0xENTYPER/baggy) shows wallet-aware product flows where billing identity and wallet identity remain separate.
+
 ## Author
 
 Built by [0xENTYPER](https://github.com/0xENTYPER).
