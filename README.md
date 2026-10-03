@@ -6,11 +6,27 @@
 
 ![Stripe](https://img.shields.io/badge/Stripe-Billing-635BFF) ![Web3](https://img.shields.io/badge/access-wallet_linked-111827) ![Security](https://img.shields.io/badge/webhooks-HMAC_verified-16A085) ![Tests](https://img.shields.io/badge/scenarios-10-7C3AED)
 
+[![CI](https://github.com/0xENTYPER/stripe-web3-entitlements/actions/workflows/ci.yml/badge.svg)](https://github.com/0xENTYPER/stripe-web3-entitlements/actions/workflows/ci.yml)
+
 </div>
 
 Accepting a payment is only half of a paid product. The harder boundary is reliably translating asynchronous billing state into access for a verified wallet without granting twice, revoking from an old event, or trusting a forged webhook.
 
 This repository demonstrates that boundary as a small executable domain layer. It contains no live Stripe keys, customer records, wallet addresses, product prices, or production application source.
+
+![Stripe event to wallet entitlement](docs/entitlement-flow.svg)
+
+## Trust boundaries
+
+| Input | Trusted when | Never sufficient alone |
+| --- | --- | --- |
+| Checkout redirect | Never for authorization | A `success` query parameter |
+| Stripe webhook | HMAC and timestamp verify | Parsed JSON without raw-body verification |
+| Billing event | Newer and idempotently persisted | Delivery order |
+| Wallet address | Ownership challenge succeeds | Checkout metadata |
+| Feature request | Session, wallet link, and entitlement agree | Client-side plan state |
+
+The architecture connects two identity systems without pretending they are the same: Stripe proves billing state; a signed challenge proves wallet control; the application owns the link between them.
 
 ## The workflow
 
@@ -91,6 +107,22 @@ The reducer in [`src/entitlements.ts`](src/entitlements.ts) is pure and determin
 
 Stripe API versions can change where billing periods live. The adapter should normalize the active subscription item's period rather than coupling the entitlement reducer to a raw webhook shape.
 
+### Deterministic state machine
+
+```mermaid
+stateDiagram-v2
+    [*] --> Revoked
+    Revoked --> Active: trialing / active
+    Active --> Active: newer active period
+    Active --> Grace: past_due
+    Grace --> Active: payment recovered
+    Grace --> Revoked: grace expired / unpaid
+    Active --> Revoked: canceled / paused
+    Revoked --> Revoked: duplicate or stale event
+```
+
+Reducer output depends only on current state, the normalized event, and policy. Stripe SDK objects never leak into authorization checks.
+
 ## Persistence contract
 
 [`schema.sql`](schema.sql) shows the minimum durable records:
@@ -100,6 +132,25 @@ Stripe API versions can change where billing periods live. The adapter should no
 - `entitlements` stores the latest source event and access decision.
 
 Webhook processing should use a transaction: insert the event ID, lock/read entitlement state, apply the reducer, and persist the new version. A list of recently processed IDs inside the reference state helps tests, but the database uniqueness constraint is the production concurrency control.
+
+### Durable event path
+
+```text
+BEGIN
+  INSERT stripe_events(event_id)       -- unique replay gate
+  SELECT entitlement FOR UPDATE        -- serialize one subject
+  APPLY deterministic reducer          -- reject stale createdAt
+  UPSERT entitlement + source_event_id -- preserve provenance
+COMMIT
+```
+
+| Delivery | Persistence result | Authorization result |
+| --- | --- | --- |
+| First valid event | Insert and reduce | State may change |
+| Exact retry | Unique conflict / known event | No-op |
+| Older event | Record for audit, reducer rejects overwrite | Latest access remains |
+| Unknown price | Persist source, fail closed | Revoked |
+| Invalid signature | No database write | No change |
 
 ## Wallet-link boundary
 
@@ -128,6 +179,17 @@ The 10 scenarios cover signature verification, secret rotation, replay tolerance
 - Keep the billing portal as the place to manage payment methods and cancellation.
 - Show revoked access without deleting user-created data.
 
+### User-facing states
+
+| Internal state | Product copy | Primary action |
+| --- | --- | --- |
+| `active` | Plan active until a concrete date | Manage billing |
+| `grace` | Payment needs attention; access remains temporarily | Update payment method |
+| `revoked` | Paid feature unavailable; user data preserved | Choose a plan |
+| webhook pending | Payment received, access is updating | Refresh status |
+
+This avoids both false success and hostile failure. Billing latency is explained, while the server remains the only authority.
+
 ## Integration checklist
 
 1. Pin a Stripe API version and test upgrades.
@@ -138,6 +200,25 @@ The 10 scenarios cover signature verification, secret rotation, replay tolerance
 6. Reconcile from Stripe's current resource when event order is ambiguous.
 7. Use idempotency keys for Stripe mutation requests.
 8. Alert on repeated webhook failures and growing event lag.
+
+## Repository map
+
+| Path | Responsibility |
+| --- | --- |
+| [`src/signature.ts`](src/signature.ts) | Raw-body HMAC verification and replay window |
+| [`src/entitlements.ts`](src/entitlements.ts) | Pure billing-to-access reducer |
+| [`src/model.ts`](src/model.ts) | Normalized event and entitlement contracts |
+| [`schema.sql`](schema.sql) | Idempotency, wallet links, durable decisions |
+| [`examples/run.ts`](examples/run.ts) | Signed event and access demonstration |
+| [`test/entitlements.test.ts`](test/entitlements.test.ts) | Security, ordering, expiry, and isolation cases |
+
+## What this case study demonstrates
+
+- integrating Stripe without treating a payment redirect as authorization;
+- designing replay-safe, order-safe webhook processing;
+- joining conventional billing identity to verified wallet ownership;
+- reducing provider payloads into a stable access policy;
+- designing recoverable payment UX while keeping authorization fail-closed.
 
 ## References
 
